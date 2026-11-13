@@ -1,0 +1,11 @@
+
+fastapi
+uvicorn[standard]
+python-multipart
+faster-whisper
+google-genai
+edge-tts
+pydub
+python-dotenv
+pyannote.audio
+demucs
