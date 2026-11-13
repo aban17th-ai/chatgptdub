@@ -1,0 +1,3 @@
+
+# Optional speaker diarization
+pyannote.audio==3.3.2
