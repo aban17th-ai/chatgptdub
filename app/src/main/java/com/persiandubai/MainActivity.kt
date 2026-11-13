@@ -25,6 +25,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -52,7 +53,15 @@ fun PersianDubApp() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
+    val preferences = remember {
+        context.getSharedPreferences(
+            "persian_dub_settings",
+            Context.MODE_PRIVATE
+        )
+    }
+
     var selectedFile by remember { mutableStateOf<Uri?>(null) }
+
     var fileName by remember {
         mutableStateOf("هنوز ویدئویی انتخاب نشده است")
     }
@@ -61,12 +70,22 @@ fun PersianDubApp() {
         mutableStateOf("https://YOUR-SERVER-URL/")
     }
 
+    var geminiApiKey by remember {
+        mutableStateOf(
+            preferences.getString("gemini_api_key", "") ?: ""
+        )
+    }
+
+    var keyValid by remember { mutableStateOf(false) }
+    var isValidating by remember { mutableStateOf(false) }
+
     var preserveMusic by remember { mutableStateOf(true) }
     var separateSpeakers by remember { mutableStateOf(true) }
 
     var isWorking by remember { mutableStateOf(false) }
     var progress by remember { mutableIntStateOf(0) }
     var statusText by remember { mutableStateOf("") }
+    var keyStatus by remember { mutableStateOf("") }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -109,19 +128,117 @@ fun PersianDubApp() {
 
             OutlinedTextField(
                 value = serverUrl,
-                onValueChange = { serverUrl = it },
+                onValueChange = {
+                    serverUrl = it
+                    keyValid = false
+                    keyStatus = ""
+                },
                 label = { Text("آدرس سرور دوبله") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                enabled = !isWorking
+                enabled = !isWorking && !isValidating
             )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            OutlinedTextField(
+                value = geminiApiKey,
+                onValueChange = {
+                    geminiApiKey = it
+                    keyValid = false
+                    keyStatus = ""
+                    preferences.edit()
+                        .putString("gemini_api_key", it)
+                        .apply()
+                },
+                label = { Text("کلید API جمنای") },
+                placeholder = { Text("کلید Gemini را وارد کن") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                enabled = !isWorking && !isValidating
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Button(
+                onClick = {
+                    scope.launch {
+                        isValidating = true
+                        keyValid = false
+                        keyStatus = "در حال بررسی کلید Gemini..."
+
+                        try {
+                            val baseUrl = serverUrl.trim()
+
+                            require(
+                                baseUrl.startsWith("https://") ||
+                                baseUrl.startsWith("http://")
+                            ) {
+                                "آدرس سرور معتبر نیست."
+                            }
+
+                            require(geminiApiKey.isNotBlank()) {
+                                "ابتدا کلید Gemini را وارد کن."
+                            }
+
+                            val api = createDubApi(baseUrl)
+
+                            val result = api.validateGeminiKey(
+                                GeminiKeyRequest(
+                                    api_key = geminiApiKey.trim()
+                                )
+                            )
+
+                            keyValid = result.valid
+
+                            keyStatus = if (result.valid) {
+                                "کلید Gemini معتبر است."
+                            } else {
+                                result.message.ifBlank {
+                                    "کلید Gemini معتبر نیست."
+                                }
+                            }
+
+                        } catch (e: Exception) {
+                            keyValid = false
+                            keyStatus =
+                                "خطا در بررسی کلید: ${e.message ?: "ارتباط ناموفق"}"
+                        } finally {
+                            isValidating = false
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isWorking && !isValidating
+            ) {
+                Text(
+                    if (isValidating) {
+                        "در حال بررسی..."
+                    } else {
+                        "بررسی اعتبار کلید Gemini"
+                    }
+                )
+            }
+
+            if (keyStatus.isNotBlank()) {
+                Text(
+                    text = keyStatus,
+                    color = if (keyValid) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                    modifier = Modifier.padding(8.dp)
+                )
+            }
 
             Spacer(modifier = Modifier.height(20.dp))
 
             Button(
                 onClick = { filePicker.launch("video/*") },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !isWorking
+                enabled = !isWorking && !isValidating
             ) {
                 Icon(Icons.Default.CloudUpload, null)
                 Spacer(modifier = Modifier.width(8.dp))
@@ -156,8 +273,14 @@ fun PersianDubApp() {
             Button(
                 onClick = {
                     val uri = selectedFile
+
                     if (uri == null) {
                         statusText = "ابتدا یک ویدئو انتخاب کن."
+                        return@Button
+                    }
+
+                    if (!keyValid) {
+                        statusText = "ابتدا اعتبار کلید Gemini را بررسی کن."
                         return@Button
                     }
 
@@ -201,18 +324,19 @@ fun PersianDubApp() {
 
                             val api = createDubApi(baseUrl)
 
-                            val mediaType =
-                                "video/mp4".toMediaType()
+                            val mediaType = "video/mp4".toMediaType()
 
-                            val mediaPart = MultipartBody.Part.createFormData(
-                                "media",
-                                fileName,
-                                tempFile.asRequestBody(mediaType)
-                            )
+                            val mediaPart =
+                                MultipartBody.Part.createFormData(
+                                    "media",
+                                    fileName,
+                                    tempFile.asRequestBody(mediaType)
+                                )
 
                             val textType = "text/plain".toMediaType()
 
-                            val language = "fa".toRequestBody(textType)
+                            val language =
+                                "fa".toRequestBody(textType)
 
                             val preserve = preserveMusic
                                 .toString()
@@ -222,14 +346,19 @@ fun PersianDubApp() {
                                 .toString()
                                 .toRequestBody(textType)
 
+                            val apiKey = geminiApiKey.trim()
+                                .toRequestBody(textType)
+
                             val job = api.createJob(
                                 mediaPart,
                                 language,
                                 preserve,
-                                speakers
+                                speakers,
+                                apiKey
                             )
 
-                            statusText = "ویدئو ارسال شد. پردازش دوبله آغاز شد."
+                            statusText =
+                                "ویدئو ارسال شد. پردازش دوبله آغاز شد."
 
                             var completed = false
 
@@ -238,7 +367,8 @@ fun PersianDubApp() {
 
                                 val result = api.getJob(job.job_id)
 
-                                progress = result.progress.coerceIn(0, 100)
+                                progress =
+                                    result.progress.coerceIn(0, 100)
 
                                 statusText = result.message.ifBlank {
                                     "در حال پردازش دوبله..."
@@ -266,7 +396,8 @@ fun PersianDubApp() {
                                 )
                             }
 
-                            statusText = "دوبله آماده شد. در حال دریافت فایل..."
+                            statusText =
+                                "دوبله آماده شد. در حال دریافت فایل..."
 
                             withContext(Dispatchers.IO) {
                                 api.downloadJob(job.job_id).use { body ->
@@ -283,26 +414,36 @@ fun PersianDubApp() {
                                 "دوبله با موفقیت دریافت و ذخیره شد."
 
                         } catch (e: Exception) {
-                            statusText = "خطا: ${e.message ?: "خطای نامشخص"}"
+                            statusText =
+                                "خطا: ${e.message ?: "خطای نامشخص"}"
                         } finally {
                             tempFile?.delete()
                             isWorking = false
                         }
                     }
                 },
-                enabled = selectedFile != null && !isWorking,
+                enabled = selectedFile != null &&
+                    !isWorking &&
+                    !isValidating &&
+                    keyValid,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(Icons.Default.PlayArrow, null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(if (isWorking) "در حال دوبله..." else "شروع دوبله")
+                Text(
+                    if (isWorking) {
+                        "در حال دوبله..."
+                    } else {
+                        "شروع دوبله"
+                    }
+                )
             }
 
             if (isWorking || progress > 0) {
                 Spacer(modifier = Modifier.height(20.dp))
 
                 LinearProgressIndicator(
-                    progress = progress / 100f,
+                    progress = { progress / 100f },
                     modifier = Modifier.fillMaxWidth()
                 )
 
@@ -323,7 +464,7 @@ fun PersianDubApp() {
             Spacer(modifier = Modifier.height(30.dp))
 
             Text(
-                "نسخه آزمایشی 0.4.0",
+                "نسخه آزمایشی 0.5.0",
                 style = MaterialTheme.typography.bodySmall
             )
         }
