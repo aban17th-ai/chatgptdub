@@ -1,0 +1,3 @@
+
+# Optional vocal and instrumental separation
+demucs==4.0.1
