@@ -6,6 +6,7 @@ import okhttp3.RequestBody
 import okhttp3.ResponseBody
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.Body
 import retrofit2.http.GET
 import retrofit2.http.Multipart
 import retrofit2.http.POST
@@ -21,7 +22,21 @@ data class JobStatusResponse(
     val output_url: String? = null
 )
 
+data class GeminiKeyRequest(
+    val api_key: String
+)
+
+data class GeminiKeyResponse(
+    val valid: Boolean,
+    val message: String = ""
+)
+
 interface DubApi {
+
+    @POST("v1/gemini/validate")
+    suspend fun validateGeminiKey(
+        @Body request: GeminiKeyRequest
+    ): GeminiKeyResponse
 
     @Multipart
     @POST("v1/jobs")
@@ -29,7 +44,8 @@ interface DubApi {
         @Part media: MultipartBody.Part,
         @Part("target_language") targetLanguage: RequestBody,
         @Part("preserve_background") preserveBackground: RequestBody,
-        @Part("separate_speakers") separateSpeakers: RequestBody
+        @Part("separate_speakers") separateSpeakers: RequestBody,
+        @Part("gemini_api_key") geminiApiKey: RequestBody
     ): JobStatusResponse
 
     @GET("v1/jobs/{jobId}")
