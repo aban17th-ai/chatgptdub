@@ -204,7 +204,9 @@ def resolve_media(req: MediaResolveRequest):
         "socket_timeout": 25,
         "cachedir": False,
         "extractor_retries": 1,
-        "ignoreerrors": False
+        "ignoreerrors": False,
+        "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}},
+        "js_runtimes": {"node": {}}
     }
 
     try:
