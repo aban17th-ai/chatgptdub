@@ -6,4 +6,5 @@ edge-tts
 faster-whisper
 google-genai
 pyannote.audio==3.3.2
-yt-dlp>=2024.10.22
+yt-dlp>=2026.07.28
+yt-dlp-ejs>=0.4.0
