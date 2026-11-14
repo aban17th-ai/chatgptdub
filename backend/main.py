@@ -17,6 +17,8 @@ from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 from faster_whisper import WhisperModel
+from yt_dlp import YoutubeDL
+from urllib.parse import urlparse
 
 APP_NAME = "Persian Dub AI API"
 DATA_DIR = Path(os.getenv("DATA_DIR", "/tmp/persian-dub"))
@@ -68,6 +70,10 @@ class TranslateRequest(BaseModel):
 
 class GeminiKeyRequest(BaseModel):
     api_key: str = Field(min_length=20, max_length=256)
+
+
+class MediaResolveRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=4096)
 
 
 def get_gemini_error(exc: Exception) -> tuple[int, str]:
@@ -138,6 +144,156 @@ def health():
         "demucs_enabled": ENABLE_DEMUCS and shutil.which("demucs") is not None,
         "diarization_enabled": ENABLE_DIARIZATION and bool(HF_TOKEN)
     }
+
+
+@app.post("/v1/media/resolve")
+def resolve_media(req: MediaResolveRequest):
+    """
+    Resolve a public video page into playable audio/video URLs.
+    Direct media URLs are passed through. Supported public page extractors
+    are deliberately limited to avoid turning this endpoint into an open proxy.
+    """
+    raw_url = req.url.strip()
+    parsed = urlparse(raw_url)
+
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(400, "لینک باید با http یا https شروع شود.")
+
+    host = parsed.hostname.lower().rstrip(".")
+    direct_extensions = (
+        ".mp4", ".m4v", ".webm", ".mov", ".mkv", ".m3u8", ".mpd", ".ts"
+    )
+
+    if parsed.path.lower().endswith(direct_extensions):
+        return {
+            "ok": True,
+            "kind": "direct",
+            "title": "Direct media",
+            "audio_url": raw_url,
+            "video_url": raw_url,
+            "duration": None
+        }
+
+    supported_hosts = (
+        "youtube.com", "youtu.be", "youtube-nocookie.com",
+        "vimeo.com", "dailymotion.com", "tiktok.com",
+        "instagram.com"
+    )
+    is_supported = any(
+        host == domain or host.endswith("." + domain)
+        for domain in supported_hosts
+    )
+
+    if not is_supported:
+        # Allow a non-page URL as a direct stream candidate. The player will
+        # report a codec/network error if it is not actually a media resource.
+        return {
+            "ok": True,
+            "kind": "direct",
+            "title": "Media link",
+            "audio_url": raw_url,
+            "video_url": raw_url,
+            "duration": None
+        }
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "socket_timeout": 25,
+        "cachedir": False,
+        "extractor_retries": 1,
+        "ignoreerrors": False
+    }
+
+    try:
+        with YoutubeDL(options) as ydl:
+            info = ydl.extract_info(raw_url, download=False)
+
+        if not info:
+            raise RuntimeError("سرویس دریافت اطلاعات ویدیو خالی بود.")
+
+        # Some extractors return a playlist-like wrapper for a single URL.
+        if info.get("_type") == "playlist":
+            entries = info.get("entries") or []
+            info = next((entry for entry in entries if entry), None)
+            if not info:
+                raise RuntimeError("هیچ ویدیوی قابل پخشی در این لینک پیدا نشد.")
+
+        formats = [
+            item for item in (info.get("formats") or [])
+            if item.get("url")
+        ]
+
+        def has_video(item):
+            return item.get("vcodec") not in (None, "none")
+
+        def has_audio(item):
+            return item.get("acodec") not in (None, "none")
+
+        def rank(item):
+            height = int(item.get("height") or 0)
+            tbr = float(item.get("tbr") or 0)
+            mp4_bonus = 100000 if item.get("ext") == "mp4" else 0
+            return (mp4_bonus + min(height, 1080) * 100 + tbr)
+
+        progressive = [
+            item for item in formats
+            if has_video(item) and has_audio(item)
+        ]
+
+        if progressive:
+            chosen = max(progressive, key=rank)
+            audio_url = chosen["url"]
+            video_url = chosen["url"]
+            mode = "progressive"
+        else:
+            video_formats = [
+                item for item in formats
+                if has_video(item) and not has_audio(item)
+            ]
+            audio_formats = [
+                item for item in formats
+                if has_audio(item) and not has_video(item)
+            ]
+
+            if not video_formats or not audio_formats:
+                fallback = info.get("url")
+                if not fallback:
+                    raise RuntimeError("فرمت قابل پخش صدا و تصویر پیدا نشد.")
+                audio_url = fallback
+                video_url = fallback
+                mode = "fallback"
+            else:
+                video_choice = max(video_formats, key=rank)
+                audio_choice = max(
+                    audio_formats,
+                    key=lambda item: float(item.get("abr") or item.get("tbr") or 0)
+                )
+                audio_url = audio_choice["url"]
+                video_url = video_choice["url"]
+                mode = "adaptive"
+
+        return {
+            "ok": True,
+            "kind": "extractor",
+            "mode": mode,
+            "title": info.get("title") or "Video",
+            "audio_url": audio_url,
+            "video_url": video_url,
+            "duration": info.get("duration"),
+            "extractor": info.get("extractor_key")
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        detail = str(exc).replace("\\n", " ")[:500]
+        raise HTTPException(
+            422,
+            f"دریافت لینک ویدیو ناموفق بود: {detail}"
+        )
 
 
 @app.post("/v1/gemini/validate")
