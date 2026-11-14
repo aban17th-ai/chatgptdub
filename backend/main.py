@@ -38,7 +38,7 @@ ENABLE_DEMUCS = os.getenv("ENABLE_DEMUCS", "false").lower() == "true"
 ENABLE_DIARIZATION = os.getenv("ENABLE_DIARIZATION", "false").lower() == "true"
 HF_TOKEN = os.getenv("HF_TOKEN")
 
-app = FastAPI(title=APP_NAME, version="0.5.0")
+app = FastAPI(title=APP_NAME, version="0.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -137,7 +137,7 @@ def health():
     return {
         "ok": True,
         "service": APP_NAME,
-        "version": "0.5.0",
+        "version": "0.6.0",
         "server_gemini_configured": bool(SERVER_GEMINI_API_KEY),
         "gemini_user_key_supported": True,
         "ffmpeg_available": shutil.which("ffmpeg") is not None,
@@ -233,10 +233,10 @@ def resolve_media(req: MediaResolveRequest):
             return item.get("acodec") not in (None, "none")
 
         def rank(item):
-            height = int(item.get("height") or 0)
+            height = min(int(item.get("height") or 0), 1080)
             tbr = float(item.get("tbr") or 0)
-            mp4_bonus = 100000 if item.get("ext") == "mp4" else 0
-            return (mp4_bonus + min(height, 1080) * 100 + tbr)
+            mp4_bonus = 1 if item.get("ext") == "mp4" else 0
+            return (height, mp4_bonus, tbr)
 
         progressive = [
             item for item in formats
