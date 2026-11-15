@@ -196,26 +196,71 @@ def resolve_media(req: MediaResolveRequest):
             "duration": None
         }
 
-    options = {
+    # Try more than one extractor client configuration. YouTube frequently
+    # changes its player responses; a single hard-coded client can go stale.
+    common_options = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-        "socket_timeout": 60,
+        "socket_timeout": 45,
         "cachedir": False,
         "extractor_retries": 2,
+        "retries": 2,
         "ignoreerrors": False,
-        "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}},
         "js_runtimes": {"node": {}}
     }
+    attempts = [
+        {**common_options,
+         "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}}},
+        common_options
+    ]
+    last_error = None
+    info = None
+
+    for options in attempts:
+        try:
+            with YoutubeDL(options) as ydl:
+                info = ydl.extract_info(raw_url, download=False)
+            if info:
+                break
+        except Exception as exc:
+            last_error = exc
+
+    if not info:
+        reason = str(last_error or "empty extractor response").lower()
+        if any(term in reason for term in (
+            "sign in", "login required", "age-restricted", "age restricted",
+            "private video", "members-only", "members only"
+        )):
+            detail = (
+                "این ویدیو عمومی و بدون ورود قابل دریافت نیست "
+                "(خصوصی، محدودیت سنی یا نیازمند حساب). فعلاً فقط لینک‌های عمومی پشتیبانی می‌شوند."
+            )
+        elif any(term in reason for term in (
+            "not a bot", "confirm you're not", "captcha", "429", "too many requests"
+        )):
+            detail = (
+                "یوتیوب موقتاً درخواست سرور را محدود کرده است. "
+                "چند دقیقه بعد دوباره امتحان کنید."
+            )
+        elif any(term in reason for term in (
+            "not available in your country", "geo-restricted", "地域"
+        )):
+            detail = "این ویدیو به‌دلیل محدودیت منطقه‌ای از سرور قابل دریافت نیست."
+        elif any(term in reason for term in (
+            "unsupported url", "is not a valid url"
+        )):
+            detail = "این قالب لینک پشتیبانی نمی‌شود. لینک مستقیم ویدیو یا لینک عمومی YouTube را وارد کنید."
+        else:
+            detail = (
+                "استخراج لینک از یوتیوب ناموفق بود. ممکن است یوتیوب ساختار پخش را تغییر داده "
+                "یا ویدیو محدود باشد. "
+                + str(last_error or "پاسخ خالی از سرویس دریافت شد.")[:260]
+            )
+        raise HTTPException(422, detail)
 
     try:
-        with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(raw_url, download=False)
-
-        if not info:
-            raise RuntimeError("سرویس دریافت اطلاعات ویدیو خالی بود.")
-
         # Some extractors return a playlist-like wrapper for a single URL.
         if info.get("_type") == "playlist":
             entries = info.get("entries") or []
@@ -240,6 +285,8 @@ def resolve_media(req: MediaResolveRequest):
             mp4_bonus = 1 if item.get("ext") == "mp4" else 0
             return (height, mp4_bonus, tbr)
 
+        # Prefer a single combined stream when available. It is more reliable
+        # for mobile playback than two separately signed adaptive URLs.
         progressive = [
             item for item in formats
             if has_video(item) and has_audio(item)
@@ -291,12 +338,8 @@ def resolve_media(req: MediaResolveRequest):
     except HTTPException:
         raise
     except Exception as exc:
-        detail = str(exc).replace("\\n", " ")[:500]
-        raise HTTPException(
-            422,
-            f"دریافت لینک ویدیو ناموفق بود: {detail}"
-        )
-
+        detail = str(exc).replace("\\n", " ")[:400]
+        raise HTTPException(422, f"ساخت لینک پخش ناموفق بود: {detail}")
 
 @app.post("/v1/gemini/validate")
 def validate_gemini_key(req: GeminiKeyRequest):
